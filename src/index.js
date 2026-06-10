@@ -63,6 +63,7 @@ const limiter = rateLimit({
 });
 
 app.use('/api/', limiter);
+app.use('/api/auth', require('./routes/auth'));
 app.use('/api/tenant', require('./routes/tenant'));
 
 app.get('/health', (req, res) => {
@@ -78,6 +79,7 @@ app.get('/', (req, res) => {
     success: true,
     message: '工作台独立后端服务',
     endpoints: {
+      auth: '/api/auth',
       tenant: '/api/tenant',
       health: '/health'
     }
