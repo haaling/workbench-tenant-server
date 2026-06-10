@@ -66,14 +66,49 @@ router.post('/companies', async (req, res) => {
   }
 
   try {
-    const { companyName, expireDate, maxUsers = 5, notes = '' } = req.body || {};
-    if (!companyName || !expireDate) {
-      return res.status(400).json({ success: false, message: 'companyName 和 expireDate 为必填项' });
+    const {
+      companyName,
+      expireDate,
+      maxUsers = 5,
+      notes = '',
+      adminUsername,
+      adminPassword,
+      adminEmail
+    } = req.body || {};
+
+    if (!companyName || !expireDate || !adminUsername || !adminPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'companyName、expireDate、adminUsername、adminPassword 为必填项'
+      });
+    }
+
+    const normalizedAdminUsername = String(adminUsername).trim();
+    const normalizedAdminEmail = adminEmail
+      ? String(adminEmail).trim().toLowerCase()
+      : `${normalizedAdminUsername}@workbench.local`;
+
+    if (normalizedAdminUsername.length < 3) {
+      return res.status(400).json({ success: false, message: '管理员账号长度至少 3 位' });
+    }
+
+    if (String(adminPassword).length < 6) {
+      return res.status(400).json({ success: false, message: '管理员密码长度至少 6 位' });
     }
 
     const expireAt = new Date(expireDate);
     if (Number.isNaN(expireAt.getTime())) {
       return res.status(400).json({ success: false, message: 'expireDate 格式无效' });
+    }
+
+    const existingAdmin = await User.findOne({
+      $or: [
+        { username: normalizedAdminUsername },
+        { email: normalizedAdminEmail }
+      ]
+    }).lean();
+    if (existingAdmin) {
+      return res.status(400).json({ success: false, message: '管理员账号或邮箱已存在' });
     }
 
     const company = await Company.create({
@@ -83,7 +118,36 @@ router.post('/companies', async (req, res) => {
       notes: String(notes || '')
     });
 
-    return res.json({ success: true, message: '公司创建成功', data: { company } });
+    try {
+      const adminUser = new User({
+        username: normalizedAdminUsername,
+        email: normalizedAdminEmail,
+        password: String(adminPassword),
+        role: 'company_admin',
+        companyId: company._id,
+        isActive: true
+      });
+      await adminUser.save();
+
+      return res.json({
+        success: true,
+        message: '公司及管理员创建成功',
+        data: {
+          company,
+          adminUser: {
+            id: adminUser._id,
+            username: adminUser.username,
+            email: adminUser.email,
+            role: adminUser.role,
+            companyId: adminUser.companyId,
+            isActive: adminUser.isActive
+          }
+        }
+      });
+    } catch (adminError) {
+      await Company.findByIdAndDelete(company._id).catch(() => null);
+      return res.status(500).json({ success: false, message: '创建公司管理员失败', error: adminError.message });
+    }
   } catch (error) {
     if (error && error.code === 11000) {
       return res.status(400).json({ success: false, message: '公司名称已存在' });
@@ -98,12 +162,85 @@ router.get('/companies', async (req, res) => {
   }
 
   try {
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.max(1, parseInt(req.query.limit, 10) || 50);
+    const skip = (page - 1) * limit;
+
     const query = isSuperAdmin(req.user)
       ? {}
       : { _id: normalizeObjectId(req.user.companyId) };
 
-    const companies = await Company.find(query).sort({ createdAt: -1 }).lean();
-    return res.json({ success: true, data: { companies } });
+    const [companies, total] = await Promise.all([
+      Company.find(query)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      Company.countDocuments(query)
+    ]);
+
+    const companyIds = companies.map((item) => item._id);
+    const userAgg = companyIds.length > 0
+      ? await User.aggregate([
+        { $match: { companyId: { $in: companyIds } } },
+        {
+          $group: {
+            _id: '$companyId',
+            totalUsers: { $sum: 1 },
+            activeUsers: {
+              $sum: {
+                $cond: ['$isActive', 1, 0]
+              }
+            },
+            adminUsers: {
+              $sum: {
+                $cond: [{ $eq: ['$role', 'company_admin'] }, 1, 0]
+              }
+            }
+          }
+        }
+      ])
+      : [];
+
+    const userAggMap = new Map(userAgg.map((item) => [String(item._id), item]));
+    const now = new Date();
+    const companiesWithStats = companies.map((company) => {
+      const agg = userAggMap.get(String(company._id));
+      const expireDate = company.expireDate ? new Date(company.expireDate) : null;
+
+      return {
+        ...company,
+        totalUsers: agg?.totalUsers || 0,
+        activeUsers: agg?.activeUsers || 0,
+        adminUsers: agg?.adminUsers || 0,
+        isExpiredByDate: expireDate ? expireDate <= now : false
+      };
+    });
+
+    const statusStats = companiesWithStats.reduce((acc, item) => {
+      const key = item.status || 'active';
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, { active: 0, disabled: 0, expired: 0 });
+
+    return res.json({
+      success: true,
+      data: {
+        companies: companiesWithStats,
+        stats: {
+          totalCompanies: total,
+          activeCompanies: statusStats.active || 0,
+          disabledCompanies: statusStats.disabled || 0,
+          expiredCompanies: statusStats.expired || 0
+        },
+        pagination: {
+          page,
+          limit,
+          total,
+          pages: Math.ceil(total / limit)
+        }
+      }
+    });
   } catch (error) {
     return res.status(500).json({ success: false, message: '获取公司列表失败', error: error.message });
   }
@@ -226,7 +363,35 @@ router.get('/users', async (req, res) => {
       .sort({ createdAt: -1 })
       .lean();
 
-    return res.json({ success: true, data: { users } });
+    const companyIds = Array.from(new Set(
+      users
+        .map((item) => item.companyId)
+        .filter((item) => item)
+        .map((item) => String(item))
+    ));
+
+    const companies = companyIds.length > 0
+      ? await Company.find({ _id: { $in: companyIds } })
+        .select('_id companyName status expireDate maxUsers')
+        .lean()
+      : [];
+    const companyMap = new Map(companies.map((item) => [String(item._id), item]));
+
+    const usersWithCompany = users.map((user) => {
+      const company = user.companyId ? companyMap.get(String(user.companyId)) : null;
+      return {
+        ...user,
+        company: company ? {
+          _id: company._id,
+          companyName: company.companyName,
+          status: company.status,
+          expireDate: company.expireDate,
+          maxUsers: company.maxUsers
+        } : null
+      };
+    });
+
+    return res.json({ success: true, data: { users: usersWithCompany } });
   } catch (error) {
     return res.status(500).json({ success: false, message: '获取用户列表失败', error: error.message });
   }

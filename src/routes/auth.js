@@ -72,20 +72,21 @@ const resolveCompanyAccess = async (user) => {
 
 router.post('/login', async (req, res) => {
   try {
-    const { email, password } = req.body || {};
+    const { account, username, password } = req.body || {};
+    const loginAccount = String(account || username || '').trim();
 
-    if (!email || !password) {
+    if (!loginAccount || !password) {
       return res.status(400).json({
         success: false,
-        message: '请提供邮箱和密码'
+        message: '请提供账号和密码'
       });
     }
 
-    const user = await User.findOne({ email: String(email).trim().toLowerCase() });
+    const user = await User.findOne({ username: loginAccount });
     if (!user) {
       return res.status(401).json({
         success: false,
-        message: '邮箱或密码错误'
+        message: '账号或密码错误'
       });
     }
 
@@ -93,7 +94,7 @@ router.post('/login', async (req, res) => {
     if (!isPasswordValid) {
       return res.status(401).json({
         success: false,
-        message: '邮箱或密码错误'
+        message: '账号或密码错误'
       });
     }
 

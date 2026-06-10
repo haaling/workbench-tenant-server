@@ -5,7 +5,8 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "nodemon src/index.js"
+    "dev": "nodemon src/index.js",
+    "create:super-admin": "node scripts/create-super-admin.js"
   },
   "keywords": [
     "workbench",
