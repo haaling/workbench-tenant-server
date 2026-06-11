@@ -9,7 +9,7 @@ const PerformanceResult = require('../models/PerformanceResult');
 
 const router = express.Router();
 
-const VALID_ROLES = ['super_admin', 'company_admin', 'finance', 'readonly', 'employee'];
+const VALID_ROLES = ['super_admin', 'company_admin', 'finance', 'branch_manager', 'team_lead', 'employee', 'readonly'];
 
 router.use(authenticateToken);
 
@@ -296,14 +296,70 @@ router.patch('/companies/:companyId', async (req, res) => {
   }
 });
 
+router.patch('/companies/:companyId/subsidiaries', async (req, res) => {
+  if (!canManageTenant(req.user)) {
+    return res.status(403).json({ success: false, message: '无权限访问，仅管理员可操作' });
+  }
+
+  try {
+    const companyId = normalizeObjectId(req.params.companyId);
+    if (!companyId) {
+      return res.status(400).json({ success: false, message: 'companyId 无效' });
+    }
+
+    if (!ensureCompanyAccess(req, companyId)) {
+      return res.status(403).json({ success: false, message: '无权编辑其他公司的信息' });
+    }
+
+    const inputSubsidiaries = Array.isArray(req.body?.subsidiaries) ? req.body.subsidiaries : [];
+    const subsidiaries = Array.from(new Set(
+      inputSubsidiaries
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+    ));
+
+    const company = await Company.findById(companyId).lean();
+    if (!company) {
+      return res.status(404).json({ success: false, message: '公司不存在' });
+    }
+
+    let extras = {};
+    if (company.notes) {
+      try {
+        extras = JSON.parse(String(company.notes));
+      } catch (_) {
+        extras = {};
+      }
+    }
+
+    const nextNotes = JSON.stringify({
+      ...(extras && typeof extras === 'object' ? extras : {}),
+      subsidiaries
+    });
+
+    const updated = await Company.findByIdAndUpdate(
+      companyId,
+      { $set: { notes: nextNotes } },
+      { new: true }
+    );
+
+    return res.json({ success: true, message: '分公司信息更新成功', data: { company: updated } });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: '更新分公司信息失败', error: error.message });
+  }
+});
+
 router.post('/users', async (req, res) => {
   if (!ensureTenantManager(req, res)) return;
 
   try {
     const { username, email, password, role = 'finance', companyId: bodyCompanyId } = req.body || {};
-    if (!username || !email || !password) {
-      return res.status(400).json({ success: false, message: 'username、email、password 为必填项' });
+    if (!username || !password) {
+      return res.status(400).json({ success: false, message: 'username、password 为必填项' });
     }
+
+    const normalizedUsername = String(username).trim();
+    const normalizedEmail = String(email || '').trim().toLowerCase() || `${normalizedUsername}@workbench.local`;
 
     if (!VALID_ROLES.includes(role)) {
       return res.status(400).json({ success: false, message: 'role 无效' });
@@ -323,14 +379,14 @@ router.post('/users', async (req, res) => {
       return res.status(404).json({ success: false, message: '公司不存在' });
     }
 
-    const existingUser = await User.findOne({ $or: [{ email }, { username }] }).lean();
+    const existingUser = await User.findOne({ $or: [{ email: normalizedEmail }, { username: normalizedUsername }] }).lean();
     if (existingUser) {
       return res.status(400).json({ success: false, message: '用户名或邮箱已存在' });
     }
 
     const user = new User({
-      username,
-      email,
+      username: normalizedUsername,
+      email: normalizedEmail,
       password,
       role,
       companyId: targetCompanyId,
