@@ -247,8 +247,8 @@ router.get('/companies', async (req, res) => {
 });
 
 router.patch('/companies/:companyId', async (req, res) => {
-  if (!isSuperAdmin(req.user)) {
-    return res.status(403).json({ success: false, message: '仅超级管理员可编辑公司' });
+  if (!canManageTenant(req.user)) {
+    return res.status(403).json({ success: false, message: '无权限访问，仅管理员可操作' });
   }
 
   try {
@@ -257,12 +257,19 @@ router.patch('/companies/:companyId', async (req, res) => {
       return res.status(400).json({ success: false, message: 'companyId 无效' });
     }
 
+    if (!ensureCompanyAccess(req, companyId)) {
+      return res.status(403).json({ success: false, message: '无权编辑其他公司的信息' });
+    }
+
     const patch = {};
-    ['companyName', 'status', 'notes'].forEach((key) => {
+    const editableFields = isSuperAdmin(req.user)
+      ? ['companyName', 'status', 'notes']
+      : ['companyName', 'notes'];
+    editableFields.forEach((key) => {
       if (req.body && req.body[key] !== undefined) patch[key] = req.body[key];
     });
 
-    if (req.body && req.body.expireDate !== undefined) {
+    if (isSuperAdmin(req.user) && req.body && req.body.expireDate !== undefined) {
       const d = new Date(req.body.expireDate);
       if (Number.isNaN(d.getTime())) {
         return res.status(400).json({ success: false, message: 'expireDate 格式无效' });
@@ -270,7 +277,7 @@ router.patch('/companies/:companyId', async (req, res) => {
       patch.expireDate = d;
     }
 
-    if (req.body && req.body.maxUsers !== undefined) {
+    if (isSuperAdmin(req.user) && req.body && req.body.maxUsers !== undefined) {
       const maxUsers = Number(req.body.maxUsers);
       if (!Number.isFinite(maxUsers) || maxUsers < 1) {
         return res.status(400).json({ success: false, message: 'maxUsers 必须大于 0' });

@@ -1,6 +1,8 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
+const WORKBENCH_USER_COLLECTION = process.env.WORKBENCH_USER_COLLECTION || 'workbench_users';
+
 const userSchema = new mongoose.Schema({
   companyId: {
     type: mongoose.Schema.Types.ObjectId,
@@ -78,4 +80,4 @@ userSchema.methods.toJSON = function() {
   return obj;
 };
 
-module.exports = mongoose.model('User', userSchema);
+module.exports = mongoose.model('User', userSchema, WORKBENCH_USER_COLLECTION);

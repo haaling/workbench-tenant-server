@@ -23,12 +23,16 @@ const main = async () => {
     throw new Error('MONGODB_URI 未配置，无法连接数据库');
   }
 
+  const dbName = process.env.WORKBENCH_DB_NAME || 'workbench_tenant';
+
   if (!username || !email || !password) {
     usage();
     throw new Error('缺少必填参数：username / email / password');
   }
 
   await mongoose.connect(process.env.MONGODB_URI, {
+    dbName,
+    appName: 'workbench-tenant-server-script',
     serverSelectionTimeoutMS: 10000,
     socketTimeoutMS: 45000,
     maxPoolSize: 10,

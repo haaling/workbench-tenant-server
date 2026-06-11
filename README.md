@@ -32,6 +32,8 @@ cp .env.example .env
 
 至少配置：
 - `MONGODB_URI`
+- `WORKBENCH_DB_NAME`（建议默认：`workbench_tenant`）
+- `WORKBENCH_USER_COLLECTION`（建议默认：`workbench_users`）
 - `JWT_SECRET`
 - `ALLOWED_ORIGINS`
 
@@ -66,15 +68,16 @@ curl -X POST "https://workbench-tenant-server-production.up.railway.app/api/auth
 ## 部署建议
 
 1. 使用单独项目/单独实例部署，避免影响认证主服务。
-2. 与认证服务共享同一个用户体系时，需保证两边 `JWT_SECRET` 一致。
-3. 前端将工作台 API 指向本服务域名，例如：`https://your-workbench-server.com/api`。
+2. 与认证服务不共享数据库。工作台请使用独立数据库名（`WORKBENCH_DB_NAME`）。
+3. 用户集合使用独立名（`WORKBENCH_USER_COLLECTION`），避免误连同库时读取到其他项目账号。
+4. 前端将工作台 API 指向本服务域名，例如：`https://your-workbench-server.com/api`。
 
 ## 新公司开通与授权 SOP
 
 ### 前提
 
 1. `workbench-tenant-server` 与认证服务使用同一套 `JWT_SECRET`。
-2. 共享同一个 MongoDB 数据库（或确保 `User`、`Company` 数据可互通）。
+2. 工作台服务使用独立数据库名（`WORKBENCH_DB_NAME`），不要与其他项目共库共集合。
 3. 你有一个 `super_admin` 账号可登录认证服务。
 
 ### 流程总览
