@@ -6,6 +6,7 @@ const Company = require('../models/Company');
 const Store = require('../models/Store');
 const Employee = require('../models/Employee');
 const PerformanceResult = require('../models/PerformanceResult');
+const PerformanceWorkflow = require('../models/PerformanceWorkflow');
 
 const router = express.Router();
 
@@ -15,6 +16,7 @@ router.use(authenticateToken);
 
 const isSuperAdmin = (user) => String(user?.role || '') === 'super_admin';
 const isCompanyAdmin = (user) => String(user?.role || '') === 'company_admin';
+const isFinance = (user) => String(user?.role || '') === 'finance';
 
 const normalizeObjectId = (value) => {
   const text = String(value || '').trim();
@@ -23,6 +25,11 @@ const normalizeObjectId = (value) => {
 };
 
 const canManageTenant = (user) => isSuperAdmin(user) || isCompanyAdmin(user);
+const canOperatePerformanceWorkflow = (user) => isSuperAdmin(user) || isCompanyAdmin(user) || isFinance(user);
+const canReadTenantStoresAndEmployees = (user) => {
+  const role = String(user?.role || '');
+  return ['super_admin', 'company_admin', 'finance', 'branch_manager', 'team_lead', 'employee'].includes(role);
+};
 
 const ensureTenantManager = (req, res) => {
   if (!canManageTenant(req.user)) {
@@ -558,7 +565,9 @@ router.post('/stores', async (req, res) => {
 });
 
 router.get('/stores', async (req, res) => {
-  if (!ensureTenantManager(req, res)) return;
+  if (!canReadTenantStoresAndEmployees(req.user)) {
+    return res.status(403).json({ success: false, message: '无权限访问店铺列表' });
+  }
 
   try {
     const { companyId: qCompanyId, keyword = '' } = req.query;
@@ -662,7 +671,9 @@ router.post('/employees', async (req, res) => {
 });
 
 router.get('/employees', async (req, res) => {
-  if (!ensureTenantManager(req, res)) return;
+  if (!canReadTenantStoresAndEmployees(req.user)) {
+    return res.status(403).json({ success: false, message: '无权限访问员工列表' });
+  }
 
   try {
     const { companyId: qCompanyId } = req.query;
@@ -722,6 +733,258 @@ router.put('/stores/:storeId/employees', async (req, res) => {
     return res.json({ success: true, message: '店铺员工绑定更新成功', data: { store: fullStore } });
   } catch (error) {
     return res.status(500).json({ success: false, message: '更新店铺员工绑定失败', error: error.message });
+  }
+});
+
+router.get('/performance/workflows/reviewers', async (req, res) => {
+  if (!canOperatePerformanceWorkflow(req.user)) {
+    return res.status(403).json({ success: false, message: '仅财务或管理员可查看可指派员工' });
+  }
+
+  try {
+    const companyId = normalizeObjectId(req.user.companyId);
+    if (!companyId) {
+      return res.status(400).json({ success: false, message: '当前账号未绑定公司' });
+    }
+
+    const users = await User.find({
+      companyId,
+      isActive: true,
+      role: { $in: ['employee', 'team_lead', 'branch_manager', 'company_admin'] }
+    })
+      .select('_id username role')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    return res.json({ success: true, data: { users } });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: '获取可指派员工失败', error: error.message });
+  }
+});
+
+router.post('/performance/workflows', async (req, res) => {
+  if (!canOperatePerformanceWorkflow(req.user)) {
+    return res.status(403).json({ success: false, message: '仅财务或管理员可创建绩效核对流程' });
+  }
+
+  try {
+    const { storeId, period, summary = {}, calculatedRows = [], uploadedRows = [] } = req.body || {};
+    const normalizedStoreId = normalizeObjectId(storeId);
+    if (!normalizedStoreId || !period) {
+      return res.status(400).json({ success: false, message: 'storeId 和 period 为必填项' });
+    }
+
+    if (!Array.isArray(uploadedRows) || uploadedRows.length === 0) {
+      return res.status(400).json({ success: false, message: 'uploadedRows 必须为非空数组' });
+    }
+    if (uploadedRows.length > 50000 || (Array.isArray(calculatedRows) && calculatedRows.length > 50000)) {
+      return res.status(400).json({ success: false, message: '单次上传行数过大，请控制在 50000 行以内' });
+    }
+
+    const store = await Store.findById(normalizedStoreId).lean();
+    if (!store) {
+      return res.status(404).json({ success: false, message: '店铺不存在' });
+    }
+    if (!ensureCompanyAccess(req, store.companyId)) {
+      return res.status(403).json({ success: false, message: '无权操作其他公司的店铺' });
+    }
+
+    const workflow = await PerformanceWorkflow.create({
+      companyId: store.companyId,
+      storeId: store._id,
+      period: String(period).trim(),
+      submittedBy: req.user._id,
+      summary,
+      calculatedRows: Array.isArray(calculatedRows) ? calculatedRows.slice(0, 50000) : [],
+      uploadedRows: uploadedRows.slice(0, 50000),
+      rowCountCalculated: Array.isArray(calculatedRows) ? calculatedRows.length : 0,
+      rowCountUploaded: uploadedRows.length,
+      status: 'draft'
+    });
+
+    return res.json({ success: true, message: '绩效核对流程创建成功', data: { workflow } });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: '创建绩效核对流程失败', error: error.message });
+  }
+});
+
+router.get('/performance/workflows', async (req, res) => {
+  try {
+    const { status, mine, storeId, period } = req.query || {};
+    const query = {};
+
+    if (isSuperAdmin(req.user)) {
+      if (storeId) {
+        const normalizedStoreId = normalizeObjectId(storeId);
+        if (!normalizedStoreId) {
+          return res.status(400).json({ success: false, message: 'storeId 无效' });
+        }
+        query.storeId = normalizedStoreId;
+      }
+    } else {
+      const companyId = normalizeObjectId(req.user.companyId);
+      if (!companyId) {
+        return res.status(400).json({ success: false, message: '当前账号未绑定公司' });
+      }
+      query.companyId = companyId;
+    }
+
+    if (status) {
+      query.status = String(status).trim();
+    }
+    if (period) {
+      query.period = String(period).trim();
+    }
+
+    if (!canOperatePerformanceWorkflow(req.user) || String(mine || '') === '1') {
+      query.assignedToUser = req.user._id;
+    }
+
+    const workflows = await PerformanceWorkflow.find(query)
+      .populate('storeId', 'storeName')
+      .populate('assignedToUser', 'username role')
+      .populate('submittedBy', 'username')
+      .populate('confirmedBy', 'username')
+      .populate('archivedBy', 'username')
+      .sort({ createdAt: -1 })
+      .limit(100)
+      .lean();
+
+    return res.json({ success: true, data: { workflows } });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: '获取绩效核对流程失败', error: error.message });
+  }
+});
+
+router.patch('/performance/workflows/:workflowId/push', async (req, res) => {
+  if (!canOperatePerformanceWorkflow(req.user)) {
+    return res.status(403).json({ success: false, message: '仅财务或管理员可推送绩效核对' });
+  }
+
+  try {
+    const workflowId = normalizeObjectId(req.params.workflowId);
+    const assignedToUserId = normalizeObjectId(req.body?.assignedToUserId);
+    const pushNote = String(req.body?.pushNote || '').trim();
+
+    if (!workflowId || !assignedToUserId) {
+      return res.status(400).json({ success: false, message: 'workflowId 和 assignedToUserId 为必填项' });
+    }
+
+    const workflow = await PerformanceWorkflow.findById(workflowId);
+    if (!workflow) {
+      return res.status(404).json({ success: false, message: '绩效核对流程不存在' });
+    }
+    if (!ensureCompanyAccess(req, workflow.companyId)) {
+      return res.status(403).json({ success: false, message: '无权操作其他公司的绩效流程' });
+    }
+    if (workflow.status === 'archived') {
+      return res.status(400).json({ success: false, message: '该流程已归档，不能再次推送' });
+    }
+
+    const targetUser = await User.findOne({ _id: assignedToUserId, companyId: workflow.companyId, isActive: true }).lean();
+    if (!targetUser) {
+      return res.status(400).json({ success: false, message: '被指派员工不存在或不在当前公司' });
+    }
+
+    workflow.assignedToUser = assignedToUserId;
+    workflow.status = 'pushed';
+    workflow.pushNote = pushNote;
+    workflow.pushedAt = new Date();
+    workflow.confirmedBy = null;
+    workflow.confirmedAt = null;
+    await workflow.save();
+
+    return res.json({ success: true, message: '已推送给员工核对', data: { workflow } });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: '推送绩效核对失败', error: error.message });
+  }
+});
+
+router.patch('/performance/workflows/:workflowId/confirm', async (req, res) => {
+  try {
+    const workflowId = normalizeObjectId(req.params.workflowId);
+    if (!workflowId) {
+      return res.status(400).json({ success: false, message: 'workflowId 无效' });
+    }
+
+    const workflow = await PerformanceWorkflow.findById(workflowId);
+    if (!workflow) {
+      return res.status(404).json({ success: false, message: '绩效核对流程不存在' });
+    }
+    if (!ensureCompanyAccess(req, workflow.companyId)) {
+      return res.status(403).json({ success: false, message: '无权操作其他公司的绩效流程' });
+    }
+    if (String(workflow.assignedToUser || '') !== String(req.user._id || '')) {
+      return res.status(403).json({ success: false, message: '仅被指派员工可确认该流程' });
+    }
+    if (workflow.status !== 'pushed') {
+      return res.status(400).json({ success: false, message: '当前流程状态不可确认' });
+    }
+
+    workflow.status = 'confirmed';
+    workflow.confirmedBy = req.user._id;
+    workflow.confirmedAt = new Date();
+    await workflow.save();
+
+    return res.json({ success: true, message: '员工核对确认成功', data: { workflow } });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: '员工确认失败', error: error.message });
+  }
+});
+
+router.patch('/performance/workflows/:workflowId/archive', async (req, res) => {
+  if (!canOperatePerformanceWorkflow(req.user)) {
+    return res.status(403).json({ success: false, message: '仅财务或管理员可归档绩效' });
+  }
+
+  try {
+    const workflowId = normalizeObjectId(req.params.workflowId);
+    if (!workflowId) {
+      return res.status(400).json({ success: false, message: 'workflowId 无效' });
+    }
+
+    const workflow = await PerformanceWorkflow.findById(workflowId);
+    if (!workflow) {
+      return res.status(404).json({ success: false, message: '绩效核对流程不存在' });
+    }
+    if (!ensureCompanyAccess(req, workflow.companyId)) {
+      return res.status(403).json({ success: false, message: '无权操作其他公司的绩效流程' });
+    }
+    if (workflow.status !== 'confirmed') {
+      return res.status(400).json({ success: false, message: '仅已确认的流程可归档' });
+    }
+
+    const archivedResult = await PerformanceResult.create({
+      companyId: workflow.companyId,
+      storeId: workflow.storeId,
+      uploadedBy: req.user._id,
+      period: workflow.period,
+      source: 'finance-reviewed-workflow',
+      summary: workflow.summary || {},
+      aggregatedRows: Array.isArray(workflow.uploadedRows) ? workflow.uploadedRows.slice(0, 50000) : [],
+      rowCount: workflow.rowCountUploaded || 0
+    });
+
+    workflow.status = 'archived';
+    workflow.archivedBy = req.user._id;
+    workflow.archivedAt = new Date();
+    await workflow.save();
+
+    return res.json({
+      success: true,
+      message: '绩效已归档入库',
+      data: {
+        workflow,
+        archivedResult: {
+          id: archivedResult._id,
+          period: archivedResult.period,
+          rowCount: archivedResult.rowCount,
+          createdAt: archivedResult.createdAt
+        }
+      }
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: '归档绩效失败', error: error.message });
   }
 });
 
