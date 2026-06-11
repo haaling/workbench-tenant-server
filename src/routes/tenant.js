@@ -28,7 +28,41 @@ const canManageTenant = (user) => isSuperAdmin(user) || isCompanyAdmin(user);
 const canOperatePerformanceWorkflow = (user) => isSuperAdmin(user) || isCompanyAdmin(user) || isFinance(user);
 const canReadTenantStoresAndEmployees = (user) => {
   const role = String(user?.role || '');
-  return ['super_admin', 'company_admin', 'finance', 'branch_manager', 'team_lead', 'employee'].includes(role);
+  return ['super_admin', 'company_admin', 'finance', 'branch_manager', 'team_lead', 'employee', 'general_manager', 'manager', 'gm'].includes(role);
+};
+
+const ARCHIVE_PERFORMANCE_COLUMNS = [
+  { label: '订单号', aliases: ['订单号', '订单编号', '平台订单号', '订单id', '订单ID'] },
+  { label: '订单时间', aliases: ['订单时间', '下单时间', '付款时间', '创建时间'] },
+  { label: '订单状态', aliases: ['订单状态', '状态'] },
+  { label: '订单预计可得', aliases: ['订单预计可得', '预计可得', '预计可得金额'] },
+  { label: '总物流费用', aliases: ['总物流费用', '物流费用', '总物流费'] },
+  { label: '采购费用', aliases: ['采购费用', '采购成本', '总采购费用'] },
+  { label: '支付宝是否开发票', aliases: ['支付宝是否开发票', '是否开票', '支付宝开票'] },
+  { label: '净利润', aliases: ['净利润', '总利润', '总收支'] }
+];
+
+const normalizeCellText = (value) => String(value ?? '').trim();
+
+const pickByAliases = (row, aliases) => {
+  for (const key of aliases) {
+    if (Object.prototype.hasOwnProperty.call(row, key)) {
+      return normalizeCellText(row[key]);
+    }
+  }
+  return '';
+};
+
+const projectArchivedRows = (rows) => {
+  if (!Array.isArray(rows)) return [];
+  return rows.map((row) => {
+    const source = row && typeof row === 'object' ? row : {};
+    const output = {};
+    for (const column of ARCHIVE_PERFORMANCE_COLUMNS) {
+      output[column.label] = pickByAliases(source, column.aliases);
+    }
+    return output;
+  });
 };
 
 const ensureTenantManager = (req, res) => {
@@ -533,6 +567,8 @@ router.post('/stores', async (req, res) => {
       metadata = {}
     } = req.body || {};
 
+    const normalizedStoreIdOnPlatform = String(storeIdOnPlatform || '').trim();
+
     if (!storeName) {
       return res.status(400).json({ success: false, message: 'storeName 为必填项' });
     }
@@ -547,13 +583,17 @@ router.post('/stores', async (req, res) => {
       return res.status(404).json({ success: false, message: '公司不存在' });
     }
 
-    const store = await Store.create({
+    const createPayload = {
       companyId,
       storeName: String(storeName).trim(),
       platform: String(platform).trim() || 'aliexpress',
-      storeIdOnPlatform: String(storeIdOnPlatform || '').trim(),
       metadata
-    });
+    };
+    if (normalizedStoreIdOnPlatform) {
+      createPayload.storeIdOnPlatform = normalizedStoreIdOnPlatform;
+    }
+
+    const store = await Store.create(createPayload);
 
     return res.json({ success: true, message: '店铺创建成功', data: { store } });
   } catch (error) {
@@ -613,8 +653,18 @@ router.patch('/stores/:storeId', async (req, res) => {
     }
 
     const patch = {};
+    const unset = {};
     ['storeName', 'platform', 'storeIdOnPlatform', 'status', 'metadata'].forEach((key) => {
       if (req.body && req.body[key] !== undefined) {
+        if (key === 'storeIdOnPlatform') {
+          const normalized = String(req.body[key] || '').trim();
+          if (normalized) {
+            patch[key] = normalized;
+          } else {
+            unset[key] = 1;
+          }
+          return;
+        }
         patch[key] = req.body[key];
       }
     });
@@ -630,7 +680,12 @@ router.patch('/stores/:storeId', async (req, res) => {
       patch.companyId = targetCompanyId;
     }
 
-    const store = await Store.findByIdAndUpdate(storeId, { $set: patch }, { new: true })
+    const updateDoc = { $set: patch };
+    if (Object.keys(unset).length > 0) {
+      updateDoc.$unset = unset;
+    }
+
+    const store = await Store.findByIdAndUpdate(storeId, updateDoc, { new: true })
       .populate('employeeIds', 'name employeeCode status')
       .lean();
 
@@ -750,7 +805,7 @@ router.get('/performance/workflows/reviewers', async (req, res) => {
     const users = await User.find({
       companyId,
       isActive: true,
-      role: { $in: ['employee', 'team_lead', 'branch_manager', 'company_admin'] }
+      role: { $in: ['employee', 'team_lead', 'branch_manager', 'company_admin', 'general_manager', 'manager', 'gm'] }
     })
       .select('_id username role')
       .sort({ createdAt: -1 })
@@ -954,6 +1009,8 @@ router.patch('/performance/workflows/:workflowId/archive', async (req, res) => {
       return res.status(400).json({ success: false, message: '仅已确认的流程可归档' });
     }
 
+    const archivedRows = projectArchivedRows(workflow.uploadedRows).slice(0, 50000);
+
     const archivedResult = await PerformanceResult.create({
       companyId: workflow.companyId,
       storeId: workflow.storeId,
@@ -961,8 +1018,8 @@ router.patch('/performance/workflows/:workflowId/archive', async (req, res) => {
       period: workflow.period,
       source: 'finance-reviewed-workflow',
       summary: workflow.summary || {},
-      aggregatedRows: Array.isArray(workflow.uploadedRows) ? workflow.uploadedRows.slice(0, 50000) : [],
-      rowCount: workflow.rowCountUploaded || 0
+      aggregatedRows: archivedRows,
+      rowCount: archivedRows.length
     });
 
     workflow.status = 'archived';

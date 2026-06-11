@@ -150,3 +150,13 @@ curl -X POST "https://workbench-tenant-server-production.up.railway.app/api/tena
 上线后给新客户开通账号，请直接使用：
 
 - CUSTOMER_ONBOARDING_RUNBOOK.md
+
+## 文档维护要求（强制）
+
+从现在开始，每次功能改动都必须同步更新文档，至少包含：
+
+1. 在 `CHANGELOG.md` 追加一条变更记录（日期、影响范围、接口/页面、回滚点）。
+2. 如涉及接口变更，同步更新本 README 对应接口说明与示例。
+3. 如涉及角色权限变更，同步补充权限说明（谁可见、谁可操作）。
+
+未更新文档的改动，视为未完成交付。

@@ -21,8 +21,7 @@ const storeSchema = new mongoose.Schema({
   },
   storeIdOnPlatform: {
     type: String,
-    trim: true,
-    default: ''
+    trim: true
   },
   status: {
     type: String,
