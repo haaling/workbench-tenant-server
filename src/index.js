@@ -43,6 +43,7 @@ app.use(cors({
     return callback(new Error('Not allowed by CORS'));
   },
   credentials: true,
+  maxAge: Math.max(60, parseInt(process.env.CORS_MAX_AGE_SECONDS || '600', 10)),
   optionsSuccessStatus: 204
 }));
 
