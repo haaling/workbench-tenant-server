@@ -7,6 +7,12 @@ const employeeSchema = new mongoose.Schema({
     required: true,
     index: true
   },
+  userId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null,
+    index: true
+  },
   name: {
     type: String,
     required: true,
@@ -16,7 +22,11 @@ const employeeSchema = new mongoose.Schema({
   employeeCode: {
     type: String,
     trim: true,
-    default: ''
+    default: undefined,
+    set: (value) => {
+      const normalized = String(value || '').trim();
+      return normalized || undefined;
+    }
   },
   status: {
     type: String,

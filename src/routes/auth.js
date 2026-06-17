@@ -145,6 +145,63 @@ router.post('/login', async (req, res) => {
   }
 });
 
+router.post('/change-password', authenticateToken, async (req, res) => {
+  try {
+    const { oldPassword, newPassword } = req.body || {};
+
+    if (!oldPassword || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: '请提供旧密码和新密码'
+      });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: '新密码至少需要6个字符'
+      });
+    }
+
+    if (oldPassword === newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: '新密码不能与旧密码相同'
+      });
+    }
+
+    const user = await User.findById(req.user._id);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: '用户不存在'
+      });
+    }
+
+    const isPasswordValid = await user.comparePassword(oldPassword);
+    if (!isPasswordValid) {
+      return res.status(401).json({
+        success: false,
+        message: '旧密码错误'
+      });
+    }
+
+    user.password = newPassword;
+    await user.save();
+
+    return res.json({
+      success: true,
+      message: '密码修改成功'
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: '修改密码失败',
+      error: error.message
+    });
+  }
+});
+
 router.get('/verify', authenticateToken, async (req, res) => {
   return res.json({
     success: true,

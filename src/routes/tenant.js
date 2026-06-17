@@ -1,5 +1,6 @@
 const express = require('express');
 const mongoose = require('mongoose');
+const crypto = require('crypto');
 const authenticateToken = require('../middleware/auth');
 const User = require('../models/User');
 const Company = require('../models/Company');
@@ -410,14 +411,23 @@ router.post('/users', async (req, res) => {
       return res.status(403).json({ success: false, message: '公司管理员不能创建超级管理员' });
     }
 
-    const targetCompanyId = resolveTargetCompanyId(req, bodyCompanyId);
-    if (!targetCompanyId) {
+    // 超级管理员可以创建不绑定公司的用户（如其他超级管理员）
+    const isSuperAdminCreatingUser = isSuperAdmin(req.user);
+    const targetCompanyId = isSuperAdminCreatingUser && role === 'super_admin'
+      ? (bodyCompanyId ? normalizeObjectId(bodyCompanyId) : null)
+      : resolveTargetCompanyId(req, bodyCompanyId);
+
+    // 只有非超级管理员用户或绑定到公司的用户才需要有效的 companyId
+    if (!isSuperAdminCreatingUser && !targetCompanyId) {
       return res.status(400).json({ success: false, message: 'companyId 无效或缺失' });
     }
 
-    const company = await Company.findById(targetCompanyId).lean();
-    if (!company) {
-      return res.status(404).json({ success: false, message: '公司不存在' });
+    // 如果提供了 companyId，验证公司存在
+    if (targetCompanyId) {
+      const company = await Company.findById(targetCompanyId).lean();
+      if (!company) {
+        return res.status(404).json({ success: false, message: '公司不存在' });
+      }
     }
 
     const existingUser = await User.findOne({ $or: [{ email: normalizedEmail }, { username: normalizedUsername }] }).lean();
@@ -699,7 +709,7 @@ router.post('/employees', async (req, res) => {
   if (!ensureTenantManager(req, res)) return;
 
   try {
-    const { companyId: bodyCompanyId, name, employeeCode = '', notes = '' } = req.body || {};
+    const { companyId: bodyCompanyId, userId: bodyUserId, name, employeeCode = '', notes = '' } = req.body || {};
     if (!name) {
       return res.status(400).json({ success: false, message: 'name 为必填项' });
     }
@@ -709,10 +719,25 @@ router.post('/employees', async (req, res) => {
       return res.status(400).json({ success: false, message: 'companyId 无效或缺失' });
     }
 
+    const userId = normalizeObjectId(bodyUserId);
+    if (bodyUserId !== undefined && !userId) {
+      return res.status(400).json({ success: false, message: 'userId 无效' });
+    }
+
+    if (userId) {
+      const linkedUser = await User.findOne({ _id: userId, companyId }).select('_id').lean();
+      if (!linkedUser) {
+        return res.status(400).json({ success: false, message: '关联账号不存在，或不属于该公司' });
+      }
+    }
+
+    const normalizedEmployeeCode = String(employeeCode || '').trim();
+
     const employee = await Employee.create({
       companyId,
+      userId,
       name: String(name).trim(),
-      employeeCode: String(employeeCode || '').trim(),
+      ...(normalizedEmployeeCode ? { employeeCode: normalizedEmployeeCode } : {}),
       notes: String(notes || '')
     });
 
@@ -722,6 +747,73 @@ router.post('/employees', async (req, res) => {
       return res.status(400).json({ success: false, message: '员工编号已存在' });
     }
     return res.status(500).json({ success: false, message: '创建员工失败', error: error.message });
+  }
+});
+
+router.patch('/employees/:employeeId/resign', async (req, res) => {
+  if (!ensureTenantManager(req, res)) return;
+
+  try {
+    const employeeId = normalizeObjectId(req.params.employeeId);
+    if (!employeeId) {
+      return res.status(400).json({ success: false, message: 'employeeId 无效' });
+    }
+
+    const employee = await Employee.findById(employeeId);
+    if (!employee) {
+      return res.status(404).json({ success: false, message: '员工不存在' });
+    }
+
+    if (!ensureCompanyAccess(req, employee.companyId)) {
+      return res.status(403).json({ success: false, message: '无权操作其他公司的员工' });
+    }
+
+    let linkedUser = null;
+    if (employee.userId) {
+      linkedUser = await User.findOne({ _id: employee.userId, companyId: employee.companyId });
+    }
+
+    if (!linkedUser) {
+      const candidateKeys = [employee.name, employee.employeeCode]
+        .map((item) => String(item || '').trim())
+        .filter(Boolean);
+
+      if (candidateKeys.length > 0) {
+        const candidates = await User.find({
+          companyId: employee.companyId,
+          username: { $in: candidateKeys }
+        });
+        if (candidates.length === 1) {
+          linkedUser = candidates[0];
+          employee.userId = linkedUser._id;
+        }
+      }
+    }
+
+    employee.status = 'inactive';
+    await employee.save();
+
+    await Store.updateMany(
+      { companyId: employee.companyId, employeeIds: employee._id },
+      { $pull: { employeeIds: employee._id } }
+    );
+
+    if (linkedUser) {
+      linkedUser.isActive = false;
+      linkedUser.password = crypto.randomBytes(24).toString('hex');
+      await linkedUser.save();
+    }
+
+    return res.json({
+      success: true,
+      message: linkedUser ? '员工已离职，账号已停用' : '员工已离职，未找到可停用的关联账号',
+      data: {
+        employee: employee.toObject(),
+        user: linkedUser ? linkedUser.toJSON() : null
+      }
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: '员工离职处理失败', error: error.message });
   }
 });
 
