@@ -709,7 +709,7 @@ router.post('/employees', async (req, res) => {
   if (!ensureTenantManager(req, res)) return;
 
   try {
-    const { companyId: bodyCompanyId, userId: bodyUserId, name, employeeCode = '', notes = '' } = req.body || {};
+    const { companyId: bodyCompanyId, userId: bodyUserId, name, subsidiary = '总公司', employeeCode = '', notes = '' } = req.body || {};
     if (!name) {
       return res.status(400).json({ success: false, message: 'name 为必填项' });
     }
@@ -732,11 +732,13 @@ router.post('/employees', async (req, res) => {
     }
 
     const normalizedEmployeeCode = String(employeeCode || '').trim();
+    const normalizedSubsidiary = String(subsidiary || '').trim() || '总公司';
 
     const employee = await Employee.create({
       companyId,
       userId,
       name: String(name).trim(),
+      subsidiary: normalizedSubsidiary,
       ...(normalizedEmployeeCode ? { employeeCode: normalizedEmployeeCode } : {}),
       notes: String(notes || '')
     });

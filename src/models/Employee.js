@@ -19,6 +19,11 @@ const employeeSchema = new mongoose.Schema({
     trim: true,
     maxlength: 50
   },
+  subsidiary: {
+    type: String,
+    trim: true,
+    default: '总公司'
+  },
   employeeCode: {
     type: String,
     trim: true,
@@ -42,6 +47,7 @@ const employeeSchema = new mongoose.Schema({
 });
 
 employeeSchema.index({ companyId: 1, name: 1 });
+employeeSchema.index({ companyId: 1, subsidiary: 1, status: 1 });
 employeeSchema.index({ companyId: 1, employeeCode: 1 }, { unique: true, sparse: true });
 
 module.exports = mongoose.model('Employee', employeeSchema);
