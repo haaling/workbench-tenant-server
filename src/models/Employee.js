@@ -48,6 +48,9 @@ const employeeSchema = new mongoose.Schema({
 
 employeeSchema.index({ companyId: 1, name: 1 });
 employeeSchema.index({ companyId: 1, subsidiary: 1, status: 1 });
-employeeSchema.index({ companyId: 1, employeeCode: 1 }, { unique: true, sparse: true });
+employeeSchema.index(
+  { companyId: 1, employeeCode: 1 },
+  { unique: true, partialFilterExpression: { employeeCode: { $type: 'string', $gt: '' } } }
+);
 
 module.exports = mongoose.model('Employee', employeeSchema);

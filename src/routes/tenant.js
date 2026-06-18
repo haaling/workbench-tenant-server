@@ -746,7 +746,11 @@ router.post('/employees', async (req, res) => {
     return res.json({ success: true, message: '员工创建成功', data: { employee } });
   } catch (error) {
     if (error && error.code === 11000) {
-      return res.status(400).json({ success: false, message: '员工编号已存在' });
+      const keyPattern = error.keyPattern || {};
+      const msg = keyPattern.employeeCode
+        ? '员工编号已被占用，请更换一个编号。'
+        : '员工数据重复，请检查后重试。';
+      return res.status(400).json({ success: false, message: msg });
     }
     return res.status(500).json({ success: false, message: '创建员工失败', error: error.message });
   }
