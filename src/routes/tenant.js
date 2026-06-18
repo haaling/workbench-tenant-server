@@ -898,8 +898,7 @@ router.get('/performance/workflows/reviewers', async (req, res) => {
 
     const users = await User.find({
       companyId,
-      isActive: true,
-      role: { $in: ['employee', 'team_lead', 'branch_manager', 'company_admin', 'general_manager', 'manager', 'gm'] }
+      isActive: true
     })
       .select('_id username role')
       .sort({ createdAt: -1 })
