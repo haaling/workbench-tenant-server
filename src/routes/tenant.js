@@ -45,6 +45,90 @@ const ARCHIVE_PERFORMANCE_COLUMNS = [
 
 const normalizeCellText = (value) => String(value ?? '').trim();
 
+const normalizeSubsidiaryName = (value) => String(value || '').trim();
+
+const parseCompanyExtras = (notes) => {
+  const text = String(notes || '').trim();
+  if (!text) return {};
+  try {
+    const parsed = JSON.parse(text);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch (_) {
+    return {};
+  }
+};
+
+const buildSubsidiarySnapshot = (extras) => {
+  const raw = extras && typeof extras === 'object' ? extras : {};
+  const legacyActiveNames = Array.isArray(raw.subsidiaries)
+    ? raw.subsidiaries.map(normalizeSubsidiaryName).filter(Boolean)
+    : [];
+  const rawProfiles = Array.isArray(raw.subsidiaryProfiles) ? raw.subsidiaryProfiles : [];
+
+  const profileMap = new Map();
+  for (const item of rawProfiles) {
+    const name = normalizeSubsidiaryName(item?.name);
+    if (!name) continue;
+    const status = item?.status === 'inactive' ? 'inactive' : 'active';
+    profileMap.set(name, {
+      name,
+      status,
+      remark: normalizeCellText(item?.remark),
+      updatedAt: normalizeCellText(item?.updatedAt),
+      disabledAt: normalizeCellText(item?.disabledAt)
+    });
+  }
+
+  for (const name of legacyActiveNames) {
+    const existing = profileMap.get(name);
+    if (existing) {
+      existing.status = 'active';
+      existing.disabledAt = '';
+    } else {
+      profileMap.set(name, {
+        name,
+        status: 'active',
+        remark: '',
+        updatedAt: '',
+        disabledAt: ''
+      });
+    }
+  }
+
+  const profiles = Array.from(profileMap.values());
+  const activeNames = profiles
+    .filter((item) => item.status !== 'inactive')
+    .map((item) => item.name);
+
+  return { profiles, activeNames };
+};
+
+const composeCompanyExtrasWithSubsidiaries = (extras, profiles) => {
+  const normalizedProfiles = Array.isArray(profiles)
+    ? profiles
+      .map((item) => ({
+        name: normalizeSubsidiaryName(item?.name),
+        status: item?.status === 'inactive' ? 'inactive' : 'active',
+        remark: normalizeCellText(item?.remark),
+        updatedAt: normalizeCellText(item?.updatedAt),
+        disabledAt: normalizeCellText(item?.disabledAt)
+      }))
+      .filter((item) => item.name)
+    : [];
+
+  const activeNames = Array.from(new Set(
+    normalizedProfiles
+      .filter((item) => item.status === 'active')
+      .map((item) => item.name)
+  ));
+
+  return {
+    ...(extras && typeof extras === 'object' ? extras : {}),
+    subsidiaries: activeNames,
+    subsidiaryProfiles: normalizedProfiles
+  };
+};
+
 const pickByAliases = (row, aliases) => {
   for (const key of aliases) {
     if (Object.prototype.hasOwnProperty.call(row, key)) {
@@ -365,19 +449,38 @@ router.patch('/companies/:companyId/subsidiaries', async (req, res) => {
       return res.status(404).json({ success: false, message: '公司不存在' });
     }
 
-    let extras = {};
-    if (company.notes) {
-      try {
-        extras = JSON.parse(String(company.notes));
-      } catch (_) {
-        extras = {};
+    const extras = parseCompanyExtras(company.notes);
+    const { profiles } = buildSubsidiarySnapshot(extras);
+    const nowIso = new Date().toISOString();
+
+    const profileMap = new Map(profiles.map((item) => [item.name, item]));
+    const activeSet = new Set(subsidiaries);
+
+    for (const item of profiles) {
+      if (activeSet.has(item.name)) {
+        item.status = 'active';
+        item.disabledAt = '';
+        item.updatedAt = nowIso;
+      } else {
+        item.status = 'inactive';
+        item.disabledAt = item.disabledAt || nowIso;
+        item.updatedAt = nowIso;
       }
     }
 
-    const nextNotes = JSON.stringify({
-      ...(extras && typeof extras === 'object' ? extras : {}),
-      subsidiaries
-    });
+    for (const name of subsidiaries) {
+      if (!profileMap.has(name)) {
+        profiles.push({
+          name,
+          status: 'active',
+          remark: '',
+          updatedAt: nowIso,
+          disabledAt: ''
+        });
+      }
+    }
+
+    const nextNotes = JSON.stringify(composeCompanyExtrasWithSubsidiaries(extras, profiles));
 
     const updated = await Company.findByIdAndUpdate(
       companyId,
@@ -388,6 +491,148 @@ router.patch('/companies/:companyId/subsidiaries', async (req, res) => {
     return res.json({ success: true, message: '分公司信息更新成功', data: { company: updated } });
   } catch (error) {
     return res.status(500).json({ success: false, message: '更新分公司信息失败', error: error.message });
+  }
+});
+
+router.patch('/companies/:companyId/subsidiaries/:subsidiaryName', async (req, res) => {
+  if (!canManageTenant(req.user)) {
+    return res.status(403).json({ success: false, message: '无权限访问，仅管理员可操作' });
+  }
+
+  try {
+    const companyId = normalizeObjectId(req.params.companyId);
+    if (!companyId) {
+      return res.status(400).json({ success: false, message: 'companyId 无效' });
+    }
+
+    if (!ensureCompanyAccess(req, companyId)) {
+      return res.status(403).json({ success: false, message: '无权编辑其他公司的信息' });
+    }
+
+    const currentName = normalizeSubsidiaryName(decodeURIComponent(req.params.subsidiaryName || ''));
+    const nextName = normalizeSubsidiaryName(req.body?.name);
+    const remark = req.body?.remark === undefined ? undefined : normalizeCellText(req.body?.remark);
+
+    if (!currentName) {
+      return res.status(400).json({ success: false, message: 'subsidiaryName 无效' });
+    }
+    if (!nextName) {
+      return res.status(400).json({ success: false, message: 'name 为必填项' });
+    }
+
+    const company = await Company.findById(companyId).lean();
+    if (!company) {
+      return res.status(404).json({ success: false, message: '公司不存在' });
+    }
+
+    const extras = parseCompanyExtras(company.notes);
+    const { profiles } = buildSubsidiarySnapshot(extras);
+    const targetIndex = profiles.findIndex((item) => item.name === currentName);
+    if (targetIndex < 0) {
+      return res.status(404).json({ success: false, message: '分公司不存在' });
+    }
+
+    if (nextName !== currentName && profiles.some((item) => item.name === nextName)) {
+      return res.status(400).json({ success: false, message: '分公司名称已存在' });
+    }
+
+    const nowIso = new Date().toISOString();
+    profiles[targetIndex].name = nextName;
+    profiles[targetIndex].updatedAt = nowIso;
+    if (remark !== undefined) {
+      profiles[targetIndex].remark = remark;
+    }
+
+    const nextNotes = JSON.stringify(composeCompanyExtrasWithSubsidiaries(extras, profiles));
+
+    const [updatedCompany] = await Promise.all([
+      Company.findByIdAndUpdate(
+        companyId,
+        { $set: { notes: nextNotes } },
+        { new: true }
+      ),
+      nextName !== currentName
+        ? Employee.updateMany(
+          { companyId, subsidiary: currentName },
+          { $set: { subsidiary: nextName } }
+        )
+        : Promise.resolve(null),
+      nextName !== currentName
+        ? Store.updateMany(
+          { companyId, 'metadata.subsidiary': currentName },
+          { $set: { 'metadata.subsidiary': nextName } }
+        )
+        : Promise.resolve(null)
+    ]);
+
+    return res.json({
+      success: true,
+      message: '分公司信息修改成功',
+      data: {
+        company: updatedCompany,
+        subsidiary: profiles[targetIndex]
+      }
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: '修改分公司信息失败', error: error.message });
+  }
+});
+
+router.patch('/companies/:companyId/subsidiaries/:subsidiaryName/invalidate', async (req, res) => {
+  if (!canManageTenant(req.user)) {
+    return res.status(403).json({ success: false, message: '无权限访问，仅管理员可操作' });
+  }
+
+  try {
+    const companyId = normalizeObjectId(req.params.companyId);
+    if (!companyId) {
+      return res.status(400).json({ success: false, message: 'companyId 无效' });
+    }
+
+    if (!ensureCompanyAccess(req, companyId)) {
+      return res.status(403).json({ success: false, message: '无权编辑其他公司的信息' });
+    }
+
+    const subsidiaryName = normalizeSubsidiaryName(decodeURIComponent(req.params.subsidiaryName || ''));
+    if (!subsidiaryName) {
+      return res.status(400).json({ success: false, message: 'subsidiaryName 无效' });
+    }
+
+    const company = await Company.findById(companyId).lean();
+    if (!company) {
+      return res.status(404).json({ success: false, message: '公司不存在' });
+    }
+
+    const extras = parseCompanyExtras(company.notes);
+    const { profiles } = buildSubsidiarySnapshot(extras);
+    const targetIndex = profiles.findIndex((item) => item.name === subsidiaryName);
+    if (targetIndex < 0) {
+      return res.status(404).json({ success: false, message: '分公司不存在' });
+    }
+
+    const nowIso = new Date().toISOString();
+    profiles[targetIndex].status = 'inactive';
+    profiles[targetIndex].updatedAt = nowIso;
+    profiles[targetIndex].disabledAt = nowIso;
+
+    const nextNotes = JSON.stringify(composeCompanyExtrasWithSubsidiaries(extras, profiles));
+
+    const updatedCompany = await Company.findByIdAndUpdate(
+      companyId,
+      { $set: { notes: nextNotes } },
+      { new: true }
+    );
+
+    return res.json({
+      success: true,
+      message: '分公司已失效',
+      data: {
+        company: updatedCompany,
+        subsidiary: profiles[targetIndex]
+      }
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: '分公司失效操作失败', error: error.message });
   }
 });
 
